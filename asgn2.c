@@ -1,15 +1,11 @@
 /**
  * File: asgn2.c
- * Date: 13/03/2011
+ * Date: 09/04/2011
  * Author: Edward Hills 
- * Version: 0.9
+ * Version: 1.0
  *
- * This is a module which serves as a virtual ramdisk which disk size is
- * limited by the amount of memory available and serves as the requirement for
- * COSC440 assignment 1 in 2012.
+ * This is a module which serves as an interrupt handler and will read a byte at a time from the parallel port.
  *
- * Note: multiple devices and concurrent modules are not supported in this
- *       version.
  */
 
 /* This program is free software; you can redistribute it and/or
