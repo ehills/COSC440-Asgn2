@@ -75,17 +75,22 @@ int asgn2_major = 0;                      /* major number of module */
 int asgn2_minor = 0;                      /* minor number of module */
 int asgn2_dev_count = 1;                  /* number of devices */
 
-
 unsigned int par_irq = 7;
 unsigned long parport_base = 0x378;
 
 module_param(asgn2_major, int, S_IRUGO);
 MODULE_PARM_DESC(asgn2_major, "device major number");
 
+/*
+ * Check whether circular buffer is full.
+ */
 int is_cb_full(void) {
     return cbuf.count == CBUF_SIZE;
 }
 
+/*
+ * Check whether circular buffer is empty.
+ */
 int is_cb_empty(void) {
     return cbuf.count == 0;
 }
@@ -141,6 +146,7 @@ void free_memory_pages(void) {
 irqreturn_t irq_handler(int irq, void *dev_id) {
 
 //TODO make
+    printk(KERN_INFO "Made it to the handler...\n");
 
 return IRQ_HANDLED;
 
