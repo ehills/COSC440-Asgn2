@@ -1,1 +1,0 @@
-cmd_/home/ehills/COSC440/asgn2/asgn2.ko := ld -r -m elf_x86_64 -T /usr/src/linux-headers-3.2.0-24-generic/scripts/module-common.lds --build-id  -o /home/ehills/COSC440/asgn2/asgn2.ko /home/ehills/COSC440/asgn2/asgn2.o /home/ehills/COSC440/asgn2/asgn2.mod.o
