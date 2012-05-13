@@ -28,6 +28,7 @@
 #include <linux/interrupt.h>
 #include <linux/irq.h>
 #include <asm/io.h>
+#include <linux/poll.h>
 #include <linux/ioport.h>
 
 #define MYDEV_NAME "asgn2"
@@ -69,7 +70,7 @@ typedef struct asgn2_dev_t {
 } asgn2_dev;
 
 asgn2_dev asgn2_device;
-circular_buffer cbuf; /* make circular buffer */
+circular_buffer cbuf;                     /* make circular buffer */
 
 int asgn2_major = 0;                      /* major number of module */  
 int asgn2_minor = 0;                      /* minor number of module */
@@ -141,8 +142,49 @@ void free_memory_pages(void) {
     asgn2_device.data_size = 0;
 }
 
+int write_to_page_list(char byte) {
+    int begin_page_no = asgn2_device.data_size / PAGE_SIZE;  /* the first page this function
+                                                should start writing to */
+    int begin_offset = asgn2_device.data_size % PAGE_SIZE;
+    int curr_page_no = 0;     /* the current page number */
+
+    struct list_head *ptr = asgn2_device.mem_list.next;
+    page_node *curr;
+
+
+    curr = list_entry(ptr, page_node, list);
+    if (begin_offset == 0) {
+
+        if ((curr = kmem_cache_alloc(asgn2_device.cache, GFP_KERNEL)) == NULL) {
+            printk(KERN_ERR "Not enough memory left\n");
+            return -ENOMEM;
+        }
+
+        if ((curr->page = alloc_page(GFP_KERNEL)) == NULL) {
+            printk(KERN_ERR "Not enough memory left\n");
+            return -ENOMEM;
+        }
+        INIT_LIST_HEAD(&(curr->list));
+        list_add_tail(&(curr->list), &(asgn2_device.mem_list));
+        asgn2_device.num_pages++;
+        ptr = asgn2_device.mem_list.prev;
+    }
+    
+    while (curr_page_no < begin_page_no) {
+        curr_page_no++;
+        ptr = ptr->next;
+    } 
+
+    // write to the page
+    memcpy(page_address(curr->page) + begin_offset, &byte, 1);
+    asgn2_device.data_size += sizeof(char);
+
+    printk(KERN_ERR "Wrote %c to the page list\n", byte);
+    return 1;
+} 
+
 /* Bottom half */
-static void write(unsigned long t_arg) {
+void write(unsigned long t_arg) {
     char byte;
     circular_buffer *buf;
 
@@ -151,11 +193,13 @@ static void write(unsigned long t_arg) {
     if (!is_cb_empty()) {
         byte = cbuffer_get_byte();
         printk(KERN_INFO "read: %c from cbuf\n", byte);
+    } else {
+        byte = '\0';
+        // TODO its empty so wait till theres something in here
     }
 
-    printk(KERN_INFO "Made it to the bottom half\n");
-
     // TODO write to the page list
+    write_to_page_list(byte);
 
 }
 
@@ -165,12 +209,11 @@ static DECLARE_TASKLET(tasklet, write, (unsigned long)&cbuf);
 /* irq handler i.e top half */
 irqreturn_t irq_handler(int irq, void *dev_id) {
     char byte;
-    printk(KERN_INFO "Made it to the handler dealing with irq %d\n", irq);
 
+    // TODO get it to be the write friken byte
     byte = inb(parport_base);
     cbuffer_add(byte);
 
-    // TODO get it to be the write friken byte
     printk("Reading char: %c\n", byte);
 
     tasklet_schedule(&tasklet);
@@ -179,6 +222,8 @@ return IRQ_HANDLED;
 
 }
 
+/* declare wait queue */
+static DECLARE_WAIT_QUEUE_HEAD(wq);
 
 /**
  * This function opens the virtual disk, if it is opened in the write-only
@@ -271,86 +316,10 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
     return size_read;
 }
 
-#if 0
 /**
  * This function writes from the user buffer to the virtual disk of this
  * module
  */
-ssize_t asgn2_write(struct file *filp, const char __user *buf, size_t count,
-        loff_t *f_pos) {
-    size_t orig_f_pos = *f_pos;  /* the original file position */
-    size_t size_written = 0;  /* size written to virtual disk in this function */
-    size_t begin_offset;      /* the offset from the beginning of a page to
-                                 start writing */
-    int begin_page_no = *f_pos / PAGE_SIZE;  /* the first page this function
-                                                should start writing to */
-
-    int curr_page_no = 0;     /* the current page number */
-    size_t curr_size_written; /* size written to virtual disk in this round */
-    size_t size_to_be_written;  /* size to be read in the current round in 
-                                   while loop */
-
-    struct list_head *ptr = asgn2_device.mem_list.next;
-    page_node *curr;
-
-    // check they didnt tell me to start where i dont have
-    if (orig_f_pos > asgn2_device.data_size) {
-        printk(KERN_WARNING "Reached end of the device on a write");
-        return 0;
-    }
-
-    begin_offset = *f_pos / PAGE_SIZE;
-
-    while (count > size_written) {
-
-        curr = list_entry(ptr, page_node, list);
-        if (ptr == &(asgn2_device.mem_list)) {
-            // ive run out of pages so better get a new one!
-
-            if ((curr = kmem_cache_alloc(asgn2_device.cache, GFP_KERNEL)) == NULL) {
-                printk(KERN_ERR "Not enough memory left\n");
-                return -ENOMEM;
-            }
-
-            if ((curr->page = alloc_page(GFP_KERNEL)) == NULL) {
-                printk(KERN_ERR "Not enough memory left\n");
-                return -ENOMEM;
-            }
-            INIT_LIST_HEAD(&(curr->list));
-            list_add_tail(&(curr->list), &(asgn2_device.mem_list));
-            asgn2_device.num_pages++;
-            ptr = asgn2_device.mem_list.prev;
-        } else if (curr_page_no < begin_page_no) {
-            curr_page_no++;
-            ptr = ptr->next;
-
-        } else {
-
-            do {
-                // write to the page
-                size_to_be_written = min(((int)PAGE_SIZE - begin_offset), (count - size_written));
-                curr_size_written = size_to_be_written - copy_from_user(page_address(curr->page) 
-                        + begin_offset, buf + size_written, size_to_be_written);
-                size_written += curr_size_written;
-                size_to_be_written -= curr_size_written;
-                begin_offset += curr_size_written;
-                asgn2_device.data_size += curr_size_written;
-
-                // finished writing so now update page and ptr and move on
-            } while (curr_size_written < size_to_be_written);
-            begin_offset = 0;
-            curr_page_no++;
-            ptr = ptr->next;
-        }
-    }
-
-    *f_pos += size_written;
-    asgn2_device.data_size = max(asgn2_device.data_size,
-            orig_f_pos + size_written);
-    printk(KERN_ERR "Wrote %d bytes\n", (int)size_written);
-    return size_written;
-} 
-#endif
 
 #define SET_NPROC_OP 1
 #define TEM_SET_NPROC _IOW(MYIOC_TYPE, SET_NPROC_OP, int) 
