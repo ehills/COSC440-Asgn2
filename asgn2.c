@@ -30,6 +30,7 @@
 #include <asm/io.h>
 #include <linux/poll.h>
 #include <linux/ioport.h>
+#include <linux/sched.h>
 
 #define MYDEV_NAME "asgn2"
 #define MYIOC_TYPE 'k'
@@ -64,6 +65,7 @@ typedef struct asgn2_dev_t {
     size_t data_size;     /* total data size in this module */
     atomic_t nprocs;      /* number of processes accessing this device */ 
     atomic_t max_nprocs;  /* max number of processes accessing this device */
+    atomic_t nevents;       /* number of events */
     struct kmem_cache *cache;      /* cache memory */
     struct class *class;     /* the udev class */
     struct device *device;   /* the udev device node */
@@ -102,7 +104,7 @@ int is_cb_empty(void) {
 void cbuffer_add(char byte) {
     int end = (cbuf.start + cbuf.count) % CBUF_SIZE;
     cbuf.buffer[end] = byte;
-    if (cbuf.count == CBUF_SIZE) {
+    if (is_cb_full()) {
         cbuf.start = (cbuf.start + 1) % CBUF_SIZE;
     } else {
         cbuf.count++;
@@ -144,9 +146,9 @@ void free_memory_pages(void) {
 
 int write_to_page_list(char byte) {
     int begin_page_no = asgn2_device.data_size / PAGE_SIZE;  /* the first page this function
-                                                should start writing to */
+                                                                should start writing to */
     int begin_offset = asgn2_device.data_size % PAGE_SIZE;
-    int curr_page_no = 0;     /* the current page number */
+    int curr_page_no = 0;                                       /* the current page number */
 
     struct list_head *ptr = asgn2_device.mem_list.next;
     page_node *curr;
@@ -183,6 +185,9 @@ int write_to_page_list(char byte) {
     return 1;
 } 
 
+/* wait queue for read processes */
+static DECLARE_WAIT_QUEUE_HEAD(read_wq);
+
 /* Bottom half */
 void write(unsigned long t_arg) {
     char byte;
@@ -190,17 +195,13 @@ void write(unsigned long t_arg) {
 
     buf = (circular_buffer *)t_arg;
 
-    if (!is_cb_empty()) {
-        byte = cbuffer_get_byte();
-        printk(KERN_INFO "read: %c from cbuf\n", byte);
-    } else {
-        byte = '\0';
-        // TODO its empty so wait till theres something in here
-    }
+    byte = cbuffer_get_byte();
+    printk(KERN_INFO "read: %c from cbuf\n", byte);
 
-    // TODO write to the page list
     write_to_page_list(byte);
 
+    atomic_inc(&asgn2_device.nevents);
+    wake_up_interruptible(&read_wq);
 }
 
 /* declare tasklet */
@@ -222,8 +223,8 @@ return IRQ_HANDLED;
 
 }
 
-/* declare wait queue */
-static DECLARE_WAIT_QUEUE_HEAD(wq);
+/* wait queue for read processes */
+static DECLARE_WAIT_QUEUE_HEAD(open_wq);
 
 /**
  * This function opens the virtual disk, if it is opened in the write-only
@@ -231,16 +232,17 @@ static DECLARE_WAIT_QUEUE_HEAD(wq);
  */
 int asgn2_open(struct inode *inode, struct file *filp) {
 
-    // TODO queue up the users rather than exit
 
     // check there arent too many proccesses already
     if (atomic_read(&asgn2_device.nprocs) >= atomic_read(&asgn2_device.max_nprocs)) {
+        // TODO add process to queue
         printk(KERN_ERR "(exit): Too many processes are accessing this device\n");
         return -EBUSY;
     }
     atomic_inc(&asgn2_device.nprocs);
 
     // if opened in write only free everything we had previously
+    // Never going to get called in this assignment
     if ((filp->f_flags & O_ACCMODE) == O_WRONLY) {
         free_memory_pages();
     }
@@ -250,6 +252,15 @@ int asgn2_open(struct inode *inode, struct file *filp) {
     return 0;
 }
 
+/* Polling function will wait and poll while other processes are busy */
+unsigned int mycdrv_poll(struct file *file, poll_table * wait)
+{
+    poll_wait(file, &open_wq, wait);
+    printk(KERN_INFO "In poll waiting on previous process to leave.\n");
+    if (atomic_read(&asgn2_device.nprocs) > 0)
+        return POLLIN | POLLRDNORM;
+    return 0;
+}
 
 /*
  * This function releases the virtual disk, but nothing needs to be done
@@ -261,7 +272,6 @@ int asgn2_release (struct inode *inode, struct file *filp) {
     printk(KERN_INFO " closing character device: %s\n\n", MYDEV_NAME);
     return 0;
 }
-
 
 /**
  * This function reads contents of the virtual disk and writes to the user 
@@ -277,14 +287,28 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
     size_t curr_size_read;    /* size read from the virtual disk in this round */
     size_t size_to_be_read;   /* size to be read in the current round in 
                                  while loop */
+    int nev;
 
     struct list_head *ptr = &asgn2_device.mem_list;
     page_node *curr;
 
+    printk(KERN_INFO "Tryna read\n");
+    wait_event_interruptible(read_wq, (atomic_read(&asgn2_device.nevents) > 0));
     if (*f_pos >= asgn2_device.data_size) {
         printk(KERN_ERR "Reached end of the device on a read");
         return 0;
     }
+    // TODO causes this to hang.. probs because of ERESTARTSYS call... figure it out. Happens after i have read all the data and it comes back in
+    if (signal_pending(current)) {
+        printk(KERN_INFO "process %i woken up by a signal\n",
+                current->pid);
+        return -ERESTARTSYS;
+    }
+    nev = atomic_read(&asgn2_device.nevents);
+    printk(KERN_INFO "Number of events: %d\n", nev);
+    atomic_sub(nev, &asgn2_device.nevents);
+
+
 
     begin_offset = *f_pos % PAGE_SIZE;
     list_for_each_entry(curr, ptr, list) {
@@ -410,6 +434,7 @@ int __init asgn2_init_module(void){
     asgn2_device.dev = MKDEV(asgn2_major, 0);
     atomic_set(&asgn2_device.max_nprocs, 1);
     atomic_set(&asgn2_device.nprocs, 0);
+    atomic_set(&asgn2_device.nevents, 0);
     asgn2_device.data_size = 0;
     asgn2_device.num_pages = 0;
 

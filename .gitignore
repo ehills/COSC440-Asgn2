@@ -4,3 +4,4 @@ asgn2.mod.*
 asgn2.o
 asgn2.ko
 .tmp_versions/*
+.*
