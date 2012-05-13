@@ -111,7 +111,7 @@ void cbuffer_add(char byte) {
 /**
  * Remove byte from circular buffer.
  */
-char cbuffer_remove(void) {
+char cbuffer_get_byte(void) {
     char byte;
     
     byte = cbuf.buffer[cbuf.start];
@@ -141,16 +141,44 @@ void free_memory_pages(void) {
     asgn2_device.data_size = 0;
 }
 
+/* Bottom half */
+static void write(unsigned long t_arg) {
+    char byte;
+    circular_buffer *buf;
+
+    buf = (circular_buffer *)t_arg;
+
+    if (!is_cb_empty()) {
+        byte = cbuffer_get_byte();
+        printk(KERN_INFO "read: %c from cbuf\n", byte);
+    }
+
+    printk(KERN_INFO "Made it to the bottom half\n");
+
+    // TODO write to the page list
+
+}
+
+/* declare tasklet */
+static DECLARE_TASKLET(tasklet, write, (unsigned long)&cbuf);
 
 /* irq handler i.e top half */
 irqreturn_t irq_handler(int irq, void *dev_id) {
+    char byte;
+    printk(KERN_INFO "Made it to the handler dealing with irq %d\n", irq);
 
-//TODO make
-    printk(KERN_INFO "Made it to the handler...\n");
+    byte = inb(parport_base);
+    cbuffer_add(byte);
+
+    // TODO get it to be the write friken byte
+    printk("Reading char: %c\n", byte);
+
+    tasklet_schedule(&tasklet);
 
 return IRQ_HANDLED;
 
 }
+
 
 /**
  * This function opens the virtual disk, if it is opened in the write-only
@@ -322,7 +350,6 @@ ssize_t asgn2_write(struct file *filp, const char __user *buf, size_t count,
     printk(KERN_ERR "Wrote %d bytes\n", (int)size_written);
     return size_written;
 } 
-*/
 #endif
 
 #define SET_NPROC_OP 1
@@ -522,7 +549,7 @@ int __init asgn2_init_module(void){
     }
 
     printk(KERN_WARNING "set up udev entry\n");
-    printk(KERN_WARNING "Hello world from %s\n", MYDEV_NAME);
+    printk(KERN_WARNING "Hello world from %s\n\n", MYDEV_NAME);
     return 0;
 
     // cleanup if class init fails
