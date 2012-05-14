@@ -213,6 +213,7 @@ irqreturn_t irq_handler(int irq, void *dev_id) {
 
     // TODO get it to be the write friken byte
     byte = inb(parport_base);
+    byte &= 127;
     cbuffer_add(byte);
 
     printk("Reading char: %c\n", byte);
@@ -571,8 +572,8 @@ void __exit asgn2_exit_module(void){
     // free and destroy things set up in reverse order
     device_destroy(asgn2_device.class, asgn2_device.dev);
     class_destroy(asgn2_device.class);
-    free_irq(7, &asgn2_device);
-    release_region(0x378, 3);
+    free_irq(par_irq, &asgn2_device);
+    release_region(parport_base, 3);
     remove_proc_entry(MYDEV_NAME, NULL);
     printk(KERN_WARNING "cleaned up udev entry\n");
 
