@@ -145,14 +145,10 @@ void free_memory_pages(void) {
 }
 
 int write_to_page_list(char byte) {
-    int begin_page_no = asgn2_device.data_size / PAGE_SIZE;  /* the first page this function
-                                                                should start writing to */
     int begin_offset = asgn2_device.data_size % PAGE_SIZE;
-    int curr_page_no = 0;                                       /* the current page number */
 
-    struct list_head *ptr = asgn2_device.mem_list.next;
+    struct list_head *ptr = asgn2_device.mem_list.prev;
     page_node *curr;
-
 
     curr = list_entry(ptr, page_node, list);
     if (begin_offset == 0) {
@@ -172,11 +168,6 @@ int write_to_page_list(char byte) {
         ptr = asgn2_device.mem_list.prev;
     }
     
-    while (curr_page_no < begin_page_no) {
-        curr_page_no++;
-        ptr = ptr->next;
-    } 
-
     // write to the page
     memcpy(page_address(curr->page) + begin_offset, &byte, 1);
     asgn2_device.data_size += sizeof(char);
@@ -194,9 +185,7 @@ void write(unsigned long t_arg) {
     circular_buffer *buf;
 
     buf = (circular_buffer *)t_arg;
-
     byte = cbuffer_get_byte();
-    printk(KERN_INFO "read: %c from cbuf\n", byte);
 
     write_to_page_list(byte);
 
@@ -216,7 +205,7 @@ irqreturn_t irq_handler(int irq, void *dev_id) {
     byte &= 127;
     cbuffer_add(byte);
 
-    printk("Reading char: %c\n", byte);
+    printk("Reading char: {%c}\n", byte);
 
     tasklet_schedule(&tasklet);
 
@@ -293,23 +282,23 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
     struct list_head *ptr = &asgn2_device.mem_list;
     page_node *curr;
 
-    printk(KERN_INFO "Tryna read\n");
-    wait_event_interruptible(read_wq, (atomic_read(&asgn2_device.nevents) > 0));
+ //   if (
+
+    printk(KERN_INFO "Tryna read..\n");
+//    wait_event_interruptible(read_wq, (atomic_read(&asgn2_device.nevents) > 0));
     if (*f_pos >= asgn2_device.data_size) {
         printk(KERN_ERR "Reached end of the device on a read");
         return 0;
     }
     // TODO causes this to hang.. probs because of ERESTARTSYS call... figure it out. Happens after i have read all the data and it comes back in
-    if (signal_pending(current)) {
-        printk(KERN_INFO "process %i woken up by a signal\n",
-                current->pid);
-        return -ERESTARTSYS;
-    }
+ //   if (signal_pending(current)) {
+  //      printk(KERN_INFO "process %i woken up by a signal\n",
+   //             current->pid);
+   //     return -ERESTARTSYS;
+ //   }
     nev = atomic_read(&asgn2_device.nevents);
     printk(KERN_INFO "Number of events: %d\n", nev);
     atomic_sub(nev, &asgn2_device.nevents);
-
-
 
     begin_offset = *f_pos % PAGE_SIZE;
     list_for_each_entry(curr, ptr, list) {
