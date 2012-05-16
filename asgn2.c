@@ -316,7 +316,7 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
 
     /* set fpos = the previous files end */
     if (session_read != 0) {
-        *f_pos = session_ends[session_read - 1] + 1;
+        *f_pos = min(((unsigned long)session_ends[session_read - 1] + 1), (unsigned long)asgn2_device.data_size);
     }
     printk(KERN_INFO "fpos: %ld\n", (unsigned long)*f_pos);
 
@@ -339,7 +339,7 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
                 printk(KERN_ERR "Just read shit\n\n");
 
                 /* check if ive read a page and if so free it */
-                if (curr_size_read + (*f_pos % PAGE_SIZE) == PAGE_SIZE) {
+                if (curr_size_read + begin_offset == PAGE_SIZE) {
                     printk(KERN_INFO "Need to delete a page\n");
                         __free_page(curr->page);
                         list_del(&(curr->list));
