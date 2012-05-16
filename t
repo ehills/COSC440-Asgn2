@@ -201,12 +201,10 @@ void write(unsigned long t_arg) {
             session_ends = kmalloc(sizeof(int), GFP_KERNEL);
         }
         session_ends[session_count++] = atomic_read(&asgn2_device.nevents);
-
-        // only wake up reader if theres a whole file to read
-        wake_up_interruptible(&read_wq);
     }
     atomic_inc(&asgn2_device.nevents);
 
+    wake_up_interruptible(&read_wq);
 }
 
 /* declare tasklet */
@@ -216,7 +214,7 @@ static DECLARE_TASKLET(tasklet, write, (unsigned long)&cbuf);
 irqreturn_t irq_handler(int irq, void *dev_id) {
     char byte;
 
-    byte = inb_p(parport_base);
+    byte = inb(parport_base);
     byte &= 127;
     cbuffer_add(byte);
 
@@ -237,19 +235,33 @@ static DECLARE_WAIT_QUEUE_HEAD(open_wq);
  */
 int asgn2_open(struct inode *inode, struct file *filp) {
 
-    wait_event_interruptible(open_wq, 
-            (atomic_read(&asgn2_device.nprocs) < atomic_read(&asgn2_device.max_nprocs)));
-    if (signal_pending(current)) {
-        printk(KERN_INFO "process %i woken up by a signal\n",
-               current->pid);
-        return -ERESTARTSYS;
-    }
+
     // check there arent too many proccesses already
+    if (atomic_read(&asgn2_device.nprocs) >= atomic_read(&asgn2_device.max_nprocs)) {
+        // TODO add process to queue
+        printk(KERN_ERR "(exit): Too many processes are accessing this device\n");
+        return -EBUSY;
+    }
     atomic_inc(&asgn2_device.nprocs);
 
-    printk(KERN_INFO "Opening device: %s\n", MYDEV_NAME);
-    printk(KERN_INFO "MAJOR number = %d, MINOR number = %d\n",
+    // if opened in write only free everything we had previously
+    // Never going to get called in this assignment
+    if ((filp->f_flags & O_ACCMODE) == O_WRONLY) {
+        free_memory_pages();
+    }
+    printk(KERN_INFO " attempting to open device: %s\n", MYDEV_NAME);
+    printk(KERN_INFO " MAJOR number = %d, MINOR number = %d\n",
             imajor(inode), iminor(inode));
+    return 0;
+}
+
+/* Polling function will wait and poll while other processes are busy */
+unsigned int asgn2_poll(struct file *file, poll_table * wait)
+{
+    poll_wait(file, &open_wq, wait);
+    printk(KERN_INFO "In poll waiting on previous process to leave.\n");
+    if (atomic_read(&asgn2_device.nprocs) > 0)
+        return POLLIN | POLLRDNORM;
     return 0;
 }
 
@@ -261,11 +273,8 @@ int asgn2_release (struct inode *inode, struct file *filp) {
 
     atomic_dec(&asgn2_device.nprocs);
     printk(KERN_INFO " closing character device: %s\n\n", MYDEV_NAME);
-    wake_up_interruptible(&open_wq);
     return 0;
 }
-
-int has_been_read = 0;
 
 /**
  * This function reads contents of the virtual disk and writes to the user 
@@ -281,42 +290,27 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
     size_t curr_size_read;    /* size read from the virtual disk in this round */
     size_t size_to_be_read;   /* size to be read in the current round in 
                                  while loop */
+    int nev;
 
     struct list_head *ptr = &asgn2_device.mem_list;
     page_node *curr;
 
-    if (has_been_read == 1) {
-        if (session_read < session_count)
-            has_been_read = 0;
-        return 0;
-    }
-
-    
-    printk(KERN_INFO "fpos: %ld\n", (unsigned long)*f_pos);
-
     printk(KERN_INFO "Tryna read..\n");
-    if (session_read != 0) {
-        if (*f_pos >= session_ends[session_read -1] + 1) {
-            printk(KERN_ERR "Reached end because of something");
-            return 0;
-        }
-    }
-
     if (*f_pos >= asgn2_device.data_size) {
         printk(KERN_ERR "Reached end of the device on a read");
         return 0;
     }
+ //   wait_event_interruptible(read_wq, (atomic_read(&asgn2_device.nevents) > 0));
+ //   if (signal_pending(current)) {
+ //       printk(KERN_INFO "process %i woken up by a signal\n",
+ //               current->pid);
+  //      return -ERESTARTSYS;
+  //  }
+//    nev = atomic_read(&asgn2_device.nevents) ;
+    //printk(KERN_INFO "Number of events: %d\n", nev);
+    //atomic_sub(nev, &asgn2_device.nevents);
+    nev = 0;
 
-
-    if (session_read != 0) {
-        *f_pos = session_ends[session_read - 1] + 1;
-    }
-    wait_event_interruptible(read_wq, (atomic_read(&asgn2_device.nevents) > 0));
-    if (signal_pending(current)) {
-        printk(KERN_INFO "process %i woken up by a signal\n",
-                current->pid);
-        return -ERESTARTSYS;
-    }
     begin_offset = *f_pos % PAGE_SIZE;
 
     count = session_ends[session_read++] - *f_pos; // tell count to only read up to the null
@@ -328,11 +322,11 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
                 size_to_be_read = min(((int)PAGE_SIZE - begin_offset), (count - size_read));
                 curr_size_read = size_to_be_read - copy_to_user(buf + size_read,
                         page_address(curr->page) + begin_offset, size_to_be_read);
-           //     if (PAGE_SIZE) {
+                if (curr_size_read == PAGE_SIZE) {
                     // free page
                     // decrement data_size
                     // decrement num_pages
-         //       }
+                }
                 size_read += curr_size_read;
                 size_to_be_read -= curr_size_read;
                 begin_offset += curr_size_read;
@@ -345,10 +339,7 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
         curr_page_no++;
     }
     printk(KERN_INFO "Read %d bytes\n", (int)size_read);
-    // minus the events i just read
-    atomic_sub(count, &asgn2_device.nevents);
     *f_pos += size_read + 1;
-    has_been_read = 1;
     return size_read + 1;
 }
 
@@ -433,6 +424,7 @@ struct file_operations asgn2_fops = {
     .read = asgn2_read,
     .unlocked_ioctl = asgn2_ioctl,
     .open = asgn2_open,
+    .poll = asgn2_poll,
     .release = asgn2_release
 };
 
@@ -600,3 +592,4 @@ void __exit asgn2_exit_module(void){
 module_init(asgn2_init_module);
 module_exit(asgn2_exit_module);
 
+ 
