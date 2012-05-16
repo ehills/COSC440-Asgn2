@@ -74,9 +74,14 @@ typedef struct asgn2_dev_t {
 asgn2_dev asgn2_device;
 circular_buffer cbuf;                     /* make circular buffer */
 
+int *session_ends;
+int session_count = 0;
+int session_read = 0;
+
 int asgn2_major = 0;                      /* major number of module */  
 int asgn2_minor = 0;                      /* minor number of module */
 int asgn2_dev_count = 1;                  /* number of devices */
+
 
 unsigned int par_irq = 7;
 unsigned long parport_base = 0x378;
@@ -189,7 +194,16 @@ void write(unsigned long t_arg) {
 
     write_to_page_list(byte);
 
+    if (byte == '\0') {
+        if (session_count != 0) {
+            session_ends = krealloc(session_ends, sizeof(int) * (session_count + 1), GFP_KERNEL);
+        } else {
+            session_ends = kmalloc(sizeof(int), GFP_KERNEL);
+        }
+        session_ends[session_count++] = atomic_read(&asgn2_device.nevents);
+    }
     atomic_inc(&asgn2_device.nevents);
+
     wake_up_interruptible(&read_wq);
 }
 
@@ -200,7 +214,6 @@ static DECLARE_TASKLET(tasklet, write, (unsigned long)&cbuf);
 irqreturn_t irq_handler(int irq, void *dev_id) {
     char byte;
 
-    // TODO get it to be the write friken byte
     byte = inb(parport_base);
     byte &= 127;
     cbuffer_add(byte);
@@ -243,7 +256,7 @@ int asgn2_open(struct inode *inode, struct file *filp) {
 }
 
 /* Polling function will wait and poll while other processes are busy */
-unsigned int mycdrv_poll(struct file *file, poll_table * wait)
+unsigned int asgn2_poll(struct file *file, poll_table * wait)
 {
     poll_wait(file, &open_wq, wait);
     printk(KERN_INFO "In poll waiting on previous process to leave.\n");
@@ -282,36 +295,31 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
     struct list_head *ptr = &asgn2_device.mem_list;
     page_node *curr;
 
- //   if (
-
     printk(KERN_INFO "Tryna read..\n");
-//    wait_event_interruptible(read_wq, (atomic_read(&asgn2_device.nevents) > 0));
     if (*f_pos >= asgn2_device.data_size) {
         printk(KERN_ERR "Reached end of the device on a read");
         return 0;
     }
-    // TODO causes this to hang.. probs because of ERESTARTSYS call... figure it out. Happens after i have read all the data and it comes back in
+ //   wait_event_interruptible(read_wq, (atomic_read(&asgn2_device.nevents) > 0));
  //   if (signal_pending(current)) {
-  //      printk(KERN_INFO "process %i woken up by a signal\n",
-   //             current->pid);
-   //     return -ERESTARTSYS;
- //   }
-    nev = atomic_read(&asgn2_device.nevents);
+ //       printk(KERN_INFO "process %i woken up by a signal\n",
+ //               current->pid);
+  //      return -ERESTARTSYS;
+  //  }
+//    nev = atomic_read(&asgn2_device.nevents) ;
     printk(KERN_INFO "Number of events: %d\n", nev);
     atomic_sub(nev, &asgn2_device.nevents);
+    nev = 0;
 
     begin_offset = *f_pos % PAGE_SIZE;
+
+    count = session_ends[session_read++] - *f_pos; // tell count to only read up to the null
+
     list_for_each_entry(curr, ptr, list) {
 
         if (begin_page_no <= curr_page_no) {
             do {
-
-                if (count <= asgn2_device.data_size) { 
-                    size_to_be_read = min(((int)PAGE_SIZE - begin_offset), (count - size_read));
-                } else {
-                    count = asgn2_device.data_size;
-                    size_to_be_read = min(((int)PAGE_SIZE - begin_offset), (count - size_read));
-                }
+                size_to_be_read = min(((int)PAGE_SIZE - begin_offset), (count - size_read));
                 curr_size_read = size_to_be_read - copy_to_user(buf + size_read,
                         page_address(curr->page) + begin_offset, size_to_be_read);
                 size_read += curr_size_read;
@@ -326,8 +334,8 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
         curr_page_no++;
     }
     printk(KERN_INFO "Read %d bytes\n", (int)size_read);
-    *f_pos += size_read;
-    return size_read;
+    *f_pos += size_read + 1;
+    return size_read + 1;
 }
 
 /**
@@ -411,6 +419,7 @@ struct file_operations asgn2_fops = {
     .read = asgn2_read,
     .unlocked_ioctl = asgn2_ioctl,
     .open = asgn2_open,
+    .poll = asgn2_poll,
     .release = asgn2_release
 };
 
