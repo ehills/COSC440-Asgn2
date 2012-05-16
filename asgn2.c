@@ -78,10 +78,11 @@ int *session_ends;
 int session_count = 0;
 int session_read = 0;
 
+int has_been_read = 0;
+
 int asgn2_major = 0;                      /* major number of module */  
 int asgn2_minor = 0;                      /* minor number of module */
 int asgn2_dev_count = 1;                  /* number of devices */
-
 
 unsigned int par_irq = 7;
 unsigned long parport_base = 0x378;
@@ -237,6 +238,7 @@ static DECLARE_WAIT_QUEUE_HEAD(open_wq);
  */
 int asgn2_open(struct inode *inode, struct file *filp) {
 
+    // check there arent too many proccesses already
     wait_event_interruptible(open_wq, 
             (atomic_read(&asgn2_device.nprocs) < atomic_read(&asgn2_device.max_nprocs)));
     if (signal_pending(current)) {
@@ -244,7 +246,6 @@ int asgn2_open(struct inode *inode, struct file *filp) {
                current->pid);
         return -ERESTARTSYS;
     }
-    // check there arent too many proccesses already
     atomic_inc(&asgn2_device.nprocs);
 
     printk(KERN_INFO "Opening device: %s\n", MYDEV_NAME);
@@ -265,7 +266,7 @@ int asgn2_release (struct inode *inode, struct file *filp) {
     return 0;
 }
 
-int has_been_read = 0;
+/* Flag to see if it file has bee nread */
 
 /**
  * This function reads contents of the virtual disk and writes to the user 
@@ -285,13 +286,35 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
     struct list_head *ptr = &asgn2_device.mem_list;
     page_node *curr;
 
+    /* check if there is data, if not go in queue and wait */
+    wait_event_interruptible(read_wq, (atomic_read(&asgn2_device.nevents) > 0));
+    if (signal_pending(current)) {
+        printk(KERN_INFO "process %i woken up by a signal\n",
+                current->pid);
+        return -ERESTARTSYS;
+    }
+    /* check to see if it's file has been read */
     if (has_been_read == 1) {
-        if (session_read < session_count)
+        if (session_read < session_count) {
             has_been_read = 0;
+        } else {
+            /* if it hasnt been deleted already delete the last (only) page */
+            ptr = asgn2_device.mem_list.prev;
+            if (ptr != &asgn2_device.mem_list) {
+                curr = list_entry(ptr, page_node, list);
+                __free_page(curr->page);
+                list_del(&(curr->list));
+                kmem_cache_free(asgn2_device.cache, curr);
+
+                asgn2_device.num_pages = 0;
+                asgn2_device.data_size = 0;
+            }
+
+        }
+        printk(KERN_INFO "I've read my file..\n");
         return 0;
     }
 
-    
     printk(KERN_INFO "fpos: %ld\n", (unsigned long)*f_pos);
 
     printk(KERN_INFO "Tryna read..\n");
@@ -311,12 +334,9 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
     if (session_read != 0) {
         *f_pos = session_ends[session_read - 1] + 1;
     }
-    wait_event_interruptible(read_wq, (atomic_read(&asgn2_device.nevents) > 0));
-    if (signal_pending(current)) {
-        printk(KERN_INFO "process %i woken up by a signal\n",
-                current->pid);
-        return -ERESTARTSYS;
-    }
+    /* add it to the wait queue if there is no data */
+
+    /* read from pages */
     begin_offset = *f_pos % PAGE_SIZE;
 
     count = session_ends[session_read++] - *f_pos; // tell count to only read up to the null
@@ -328,11 +348,19 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
                 size_to_be_read = min(((int)PAGE_SIZE - begin_offset), (count - size_read));
                 curr_size_read = size_to_be_read - copy_to_user(buf + size_read,
                         page_address(curr->page) + begin_offset, size_to_be_read);
-           //     if (PAGE_SIZE) {
-                    // free page
-                    // decrement data_size
-                    // decrement num_pages
-         //       }
+                
+                /* check if ive read a page and if so free it */
+                if (curr_size_read + (*f_pos % PAGE_SIZE) == PAGE_SIZE) {
+                    printk(KERN_INFO "Need to delete a page\n");
+                    if (ptr != &asgn2_device.mem_list) {
+                        __free_page(curr->page);
+                        list_del(&(curr->list));
+                        kmem_cache_free(asgn2_device.cache, curr);
+
+                        asgn2_device.num_pages -= 1;
+                        asgn2_device.data_size -= PAGE_SIZE;
+                    }
+                }
                 size_read += curr_size_read;
                 size_to_be_read -= curr_size_read;
                 begin_offset += curr_size_read;
@@ -345,10 +373,11 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
         curr_page_no++;
     }
     printk(KERN_INFO "Read %d bytes\n", (int)size_read);
-    // minus the events i just read
-    atomic_sub(count, &asgn2_device.nevents);
+    // minus the events i just read (plus nul)
+    atomic_sub(count+1, &asgn2_device.nevents);
     *f_pos += size_read + 1;
     has_been_read = 1;
+    printk(KERN_INFO "N events left: %d\n", (int)atomic_read(&asgn2_device.nevents));
     return size_read + 1;
 }
 
