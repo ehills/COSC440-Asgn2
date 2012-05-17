@@ -109,6 +109,10 @@ int is_cb_empty(void) {
  */
 void cbuffer_add(char byte) {
     int end = (cbuf.start + cbuf.count) % CBUF_SIZE;
+    if (byte == '\0') {
+        printk(KERN_ERR "Found nul!\n");
+    }
+    printk(KERN_ERR "buffadd: %c\n", byte);
     cbuf.buffer[end] = byte;
     if (is_cb_full()) {
         cbuf.start = (cbuf.start + 1) % CBUF_SIZE;
@@ -126,6 +130,7 @@ char cbuffer_get_byte(void) {
     byte = cbuf.buffer[cbuf.start];
     cbuf.start = (cbuf.start + 1) % CBUF_SIZE;
     cbuf.count--;
+    printk(KERN_ERR "buffget: %c\n", byte);
     return byte;
 
 }
@@ -189,13 +194,12 @@ static DECLARE_WAIT_QUEUE_HEAD(read_wq);
 /* Bottom half */
 void write(unsigned long t_arg) {
     char byte;
-    circular_buffer *buf;
 
-    buf = (circular_buffer *)t_arg;
     byte = cbuffer_get_byte();
 
     write_to_page_list(byte);
 
+    atomic_inc(&asgn2_device.nevents);
     if (byte == '\0') {
         if (session_count != 0) {
             session_ends = krealloc(session_ends, sizeof(int) * (session_count + 1), GFP_KERNEL);
@@ -204,12 +208,12 @@ void write(unsigned long t_arg) {
         }
         session_ends[session_count] = asgn2_device.data_size - 1;
         session_count++;
-
+        
+        printk(KERN_ERR "Read the nul: {%c}\n", byte);
         // only wake up reader if theres a whole file to read
-        printk(KERN_INFO "read until: %d\n", session_ends[session_count-1]);
+        printk(KERN_ERR "read until: %d\n", session_ends[session_count-1]);
         wake_up_interruptible(&read_wq);
     }
-    atomic_inc(&asgn2_device.nevents);
 
 }
 
@@ -289,6 +293,7 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
     size_t size_to_be_read;   /* size to be read in the current round in 
                                  while loop */
 
+    int i;
     struct list_head *ptr = &asgn2_device.mem_list;
     page_node *curr;
     page_node *temp;
@@ -328,9 +333,13 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
     /* read from pages */
     begin_offset = *f_pos % PAGE_SIZE;
 
+    printk(KERN_INFO "offset is: %ld\n", (unsigned long)begin_offset);
+    
+
     /* TODO */
     /* Make count only the distance from where i am now to my nul */
-    count = (session_ends[session_read++] - *f_pos); // tell count to only read up to the null
+    count = (session_ends[session_read] - *f_pos); // tell count to only read up to the null
+    session_read++;
 
     printk(KERN_INFO "going to read: %d bytes\n", (int)count);
 
@@ -355,7 +364,12 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
                         asgn2_device.num_pages -= 1;
                         asgn2_device.data_size -= PAGE_SIZE;
                         // TODO
-                        //session_ends[session_read -1] -= PAGE_SIZE;
+                        /* Decrement the end position for this file by page_size */
+                        for (i = session_read -1; i < session_count; i++) {
+                            session_ends[i] -= PAGE_SIZE;
+                        }
+                        printk(KERN_ERR "My end is now: %i\n", session_ends[session_read-1]);
+
                 }
                 size_read += curr_size_read;
                 size_to_be_read -= curr_size_read;
@@ -372,6 +386,7 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
     // minus the events i just read (plus nul)
     atomic_sub(size_read+1, &asgn2_device.nevents);
     *f_pos += size_read + 1;
+    /* eof flag */
     finished_reading = 1;
     printk(KERN_INFO "N events left: %d\n", (int)atomic_read(&asgn2_device.nevents));
     return size_read + 1;
@@ -608,6 +623,7 @@ void __exit asgn2_exit_module(void){
     // free and destroy things set up in reverse order
     device_destroy(asgn2_device.class, asgn2_device.dev);
     class_destroy(asgn2_device.class);
+    synchronize_irq(par_irq);
     free_irq(par_irq, &asgn2_device);
     release_region(parport_base, 3);
     remove_proc_entry(MYDEV_NAME, NULL);
