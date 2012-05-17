@@ -150,6 +150,7 @@ void free_memory_pages(void) {
     asgn2_device.data_size = 0;
 }
 
+/* write byte to the page queue */
 int write_to_page_list(char byte) {
     int begin_offset = asgn2_device.data_size % PAGE_SIZE;
 
@@ -294,7 +295,6 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
 
     /* check to see if it's file has been read */
     if (finished_reading == 1) {
-
         printk(KERN_INFO "I've read my file..\n");
         return 0;
     }
@@ -314,16 +314,23 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
         return 0;
     }
 
+    /* TODO */
     /* set fpos = the previous files end */
     if (session_read != 0) {
-        *f_pos = min(((unsigned long)session_ends[session_read - 1] + 1), (unsigned long)asgn2_device.data_size);
+        //*f_pos = min(((unsigned long)session_ends[session_read - 1] + 1), (unsigned long)asgn2_device.data_size);
+        //*f_pos %= PAGE_SIZE;
+        
+        /* Case 1.5 */
+        *f_pos = session_ends[session_read -1] + 1;
     }
     printk(KERN_INFO "fpos: %ld\n", (unsigned long)*f_pos);
 
     /* read from pages */
     begin_offset = *f_pos % PAGE_SIZE;
 
-    count = session_ends[session_read++] - *f_pos; // tell count to only read up to the null
+    /* TODO */
+    /* Make count only the distance from where i am now to my nul */
+    count = (session_ends[session_read++] - *f_pos); // tell count to only read up to the null
 
     printk(KERN_INFO "going to read: %d bytes\n", (int)count);
 
@@ -347,7 +354,8 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
 
                         asgn2_device.num_pages -= 1;
                         asgn2_device.data_size -= PAGE_SIZE;
-                        session_ends[session_read -1] -= PAGE_SIZE;
+                        // TODO
+                        //session_ends[session_read -1] -= PAGE_SIZE;
                 }
                 size_read += curr_size_read;
                 size_to_be_read -= curr_size_read;
@@ -362,7 +370,7 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
     }
     printk(KERN_INFO "Read %d bytes\n", (int)size_read);
     // minus the events i just read (plus nul)
-    atomic_sub(count+1, &asgn2_device.nevents);
+    atomic_sub(size_read+1, &asgn2_device.nevents);
     *f_pos += size_read + 1;
     finished_reading = 1;
     printk(KERN_INFO "N events left: %d\n", (int)atomic_read(&asgn2_device.nevents));
