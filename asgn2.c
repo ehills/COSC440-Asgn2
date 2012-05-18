@@ -74,7 +74,7 @@ typedef struct asgn2_dev_t {
 asgn2_dev asgn2_device;
 circular_buffer cbuf;                     /* make circular buffer */
 
-int *session_ends;
+int *session_ends;                        /* Keep track of session (file) */
 int session_count = 0;
 int session_read = 0;
 
@@ -110,9 +110,9 @@ int is_cb_empty(void) {
 void cbuffer_add(char byte) {
     int end = (cbuf.start + cbuf.count) % CBUF_SIZE;
     if (byte == '\0') {
-        printk(KERN_ERR "Found nul!\n");
+        printk(KERN_ERR "Found nul! Writing it to cbuf in position: %d\n", end);
     }
-    printk(KERN_ERR "buffadd: %c\n", byte);
+  //  printk(KERN_ERR "buffadd: %c\n", byte);
     cbuf.buffer[end] = byte;
     if (is_cb_full()) {
         cbuf.start = (cbuf.start + 1) % CBUF_SIZE;
@@ -128,9 +128,12 @@ char cbuffer_get_byte(void) {
     char byte;
 
     byte = cbuf.buffer[cbuf.start];
+    if (byte == '\0') {
+        printk(KERN_ERR "Found null in pos %d\n", cbuf.start);
+    }
     cbuf.start = (cbuf.start + 1) % CBUF_SIZE;
     cbuf.count--;
-    printk(KERN_ERR "buffget: %c\n", byte);
+//    printk(KERN_ERR "buffget: %c\n", byte);
     return byte;
 
 }
@@ -195,24 +198,27 @@ static DECLARE_WAIT_QUEUE_HEAD(read_wq);
 void write(unsigned long t_arg) {
     char byte;
 
-    byte = cbuffer_get_byte();
+    while (!is_cb_empty()) {
+        byte = cbuffer_get_byte();
+        printk(KERN_ERR "cbuf count is: %d\tbyte: %c\n", cbuf.count, byte);
 
-    write_to_page_list(byte);
+        write_to_page_list(byte);
 
-    atomic_inc(&asgn2_device.nevents);
-    if (byte == '\0') {
-        if (session_count != 0) {
-            session_ends = krealloc(session_ends, sizeof(int) * (session_count + 1), GFP_KERNEL);
-        } else {
-            session_ends = kmalloc(sizeof(int), GFP_KERNEL);
+        atomic_inc(&asgn2_device.nevents);
+        if (byte == '\0') {
+            printk(KERN_ERR "Read the nul!\n");
+            if (session_count != 0) {
+                session_ends = krealloc(session_ends, sizeof(int) * (session_count + 1), GFP_KERNEL);
+            } else {
+                session_ends = kmalloc(sizeof(int), GFP_KERNEL);
+            }
+            session_ends[session_count] = asgn2_device.data_size - 1;
+            session_count++;
+            
+            // only wake up reader if theres a whole file to read
+            printk(KERN_ERR "read until: %d\n", session_ends[session_count-1]);
+            wake_up_interruptible(&read_wq);
         }
-        session_ends[session_count] = asgn2_device.data_size - 1;
-        session_count++;
-        
-        printk(KERN_ERR "Read the nul: {%c}\n", byte);
-        // only wake up reader if theres a whole file to read
-        printk(KERN_ERR "read until: %d\n", session_ends[session_count-1]);
-        wake_up_interruptible(&read_wq);
     }
 
 }
@@ -227,8 +233,6 @@ irqreturn_t irq_handler(int irq, void *dev_id) {
     byte = inb_p(parport_base);
     byte &= 127;
     cbuffer_add(byte);
-
-  //  printk("Reading char: {%c}\n", byte);
 
     tasklet_schedule(&tasklet);
 
@@ -245,7 +249,6 @@ static DECLARE_WAIT_QUEUE_HEAD(open_wq);
  */
 int asgn2_open(struct inode *inode, struct file *filp) {
 
-    printk(KERN_INFO "PID: %d\n", current->pid);
 
     // check there arent too many proccesses already
     wait_event_interruptible(open_wq, 
@@ -256,6 +259,7 @@ int asgn2_open(struct inode *inode, struct file *filp) {
                 current->pid);
         return -ERESTARTSYS;
     }
+    printk(KERN_INFO "Current running PID: %d\n", current->pid);
     atomic_inc(&asgn2_device.nprocs);
 
     printk(KERN_INFO "Opening device: %s\n", MYDEV_NAME);
@@ -304,8 +308,8 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
         return 0;
     }
 
-    /* check if there is data, if not go in queue and wait */
-    wait_event_interruptible(read_wq, (atomic_read(&asgn2_device.nevents) > 0));
+    /* check if a whole file has been written, if not go in queue and wait */
+    wait_event_interruptible(read_wq, (session_count > session_read));
     if (signal_pending(current)) {
         printk(KERN_INFO "process %i woken up by a signal\n",
                 current->pid);
@@ -319,13 +323,8 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
         return 0;
     }
 
-    /* TODO */
     /* set fpos = the previous files end */
     if (session_read != 0) {
-        //*f_pos = min(((unsigned long)session_ends[session_read - 1] + 1), (unsigned long)asgn2_device.data_size);
-        //*f_pos %= PAGE_SIZE;
-        
-        /* Case 1.5 */
         *f_pos = session_ends[session_read -1] + 1;
     }
     printk(KERN_INFO "fpos: %ld\n", (unsigned long)*f_pos);
@@ -335,15 +334,12 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
 
     printk(KERN_INFO "offset is: %ld\n", (unsigned long)begin_offset);
     
-
-    /* TODO */
     /* Make count only the distance from where i am now to my nul */
     count = (session_ends[session_read] - *f_pos); // tell count to only read up to the null
     session_read++;
 
     printk(KERN_INFO "going to read: %d bytes\n", (int)count);
 
-    //list_for_each_entry(curr, ptr, list) {
     list_for_each_entry_safe(curr, temp, ptr, list) {
 
         if (begin_page_no <= curr_page_no) {
@@ -363,7 +359,6 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
 
                         asgn2_device.num_pages -= 1;
                         asgn2_device.data_size -= PAGE_SIZE;
-                        // TODO
                         /* Decrement the end position for this file by page_size */
                         for (i = session_read -1; i < session_count; i++) {
                             session_ends[i] -= PAGE_SIZE;
