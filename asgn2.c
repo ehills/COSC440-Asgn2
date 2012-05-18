@@ -245,6 +245,10 @@ static DECLARE_WAIT_QUEUE_HEAD(open_wq);
  */
 int asgn2_open(struct inode *inode, struct file *filp) {
 
+    if ((filp->f_flags & O_ACCMODE) == O_WRONLY || (filp->f_flags & O_ACCMODE) == O_RDWR) {
+        printk(KERN_INFO "Cannot access device for writing\n");
+               return -EACCES;
+    } 
 
     // check there arent too many proccesses already
     wait_event_interruptible(open_wq, 
