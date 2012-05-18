@@ -109,10 +109,7 @@ int is_cb_empty(void) {
  */
 void cbuffer_add(char byte) {
     int end = (cbuf.start + cbuf.count) % CBUF_SIZE;
-    if (byte == '\0') {
-        printk(KERN_ERR "Found nul! Writing it to cbuf in position: %d\n", end);
-    }
-  //  printk(KERN_ERR "buffadd: %c\n", byte);
+
     cbuf.buffer[end] = byte;
     if (is_cb_full()) {
         cbuf.start = (cbuf.start + 1) % CBUF_SIZE;
@@ -128,9 +125,6 @@ char cbuffer_get_byte(void) {
     char byte;
 
     byte = cbuf.buffer[cbuf.start];
-    if (byte == '\0') {
-        printk(KERN_ERR "Found null in pos %d\n", cbuf.start);
-    }
     cbuf.start = (cbuf.start + 1) % CBUF_SIZE;
     cbuf.count--;
     return byte;
@@ -304,7 +298,6 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
 
     /* check to see if it's file has been read */
     if (finished_reading == 1) {
-        printk(KERN_INFO "I've read my file..\n");
         return 0;
     }
 
@@ -316,8 +309,6 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
         return -ERESTARTSYS;
     }
 
-    printk(KERN_INFO "Tryna read..\n");
-
     if (*f_pos >= asgn2_device.data_size) {
         printk(KERN_ERR "Reached end of the device on a read");
         return 0;
@@ -327,18 +318,13 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
     if (session_read != 0) {
         *f_pos = session_ends[session_read -1] + 1;
     }
-    printk(KERN_INFO "fpos: %ld\n", (unsigned long)*f_pos);
 
     /* read from pages */
     begin_offset = *f_pos % PAGE_SIZE;
 
-    printk(KERN_INFO "offset is: %ld\n", (unsigned long)begin_offset);
-    
     /* Make count only the distance from where i am now to my nul */
     count = (session_ends[session_read] - *f_pos); // tell count to only read up to the null
     session_read++;
-
-    printk(KERN_INFO "going to read: %d bytes\n", (int)count);
 
     list_for_each_entry_safe(curr, temp, ptr, list) {
 
